@@ -110,7 +110,7 @@ mod tests {
         let handler = ProtocolHandler::new();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
-            id: RequestId::Number(1),
+            id: Some(RequestId::Number(1)),
             method: "test".to_string(),
             params: None,
         };
@@ -123,7 +123,7 @@ mod tests {
         let handler = ProtocolHandler::new();
         let request = JsonRpcRequest {
             jsonrpc: "1.0".to_string(),
-            id: RequestId::Number(1),
+            id: Some(RequestId::Number(1)),
             method: "test".to_string(),
             params: None,
         };
@@ -136,7 +136,7 @@ mod tests {
         let handler = ProtocolHandler::new();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
-            id: RequestId::Number(1),
+            id: Some(RequestId::Number(1)),
             method: "".to_string(),
             params: None,
         };

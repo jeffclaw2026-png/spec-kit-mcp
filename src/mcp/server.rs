@@ -48,9 +48,11 @@ impl McpServer {
             // Handle request
             let response = self.handle_request(request).await;
 
-            // Write response
-            if let Err(e) = self.transport.write_response(response).await {
-                tracing::error!(error = %e, "Failed to write response");
+            // Write response (notifications return None)
+            if let Some(response) = response {
+                if let Err(e) = self.transport.write_response(response).await {
+                    tracing::error!(error = %e, "Failed to write response");
+                }
             }
         }
 
@@ -59,37 +61,66 @@ impl McpServer {
     }
 
     /// Handle a JSON-RPC request
-    async fn handle_request(&self, request: JsonRpcRequest) -> super::types::JsonRpcResponse {
+    async fn handle_request(&self, request: JsonRpcRequest) -> Option<super::types::JsonRpcResponse> {
+        // Notifications have no id — process but don't respond
+        let is_notification = request.id.is_none();
+
         // Validate request
         if let Err(e) = self.protocol.validate_request(&request) {
-            return self.protocol.create_error_response(request.id, e);
+            return Some(self.protocol.create_error_response(
+                request.id.unwrap_or(super::types::RequestId::Null), e,
+            ));
         }
 
         // Route to appropriate handler
-        match request.method.as_str() {
-            "initialize" => self.protocol.handle_initialize(request.id),
-
-            "ping" => self.protocol.handle_ping(request.id),
-
+        let result = match request.method.as_str() {
+            "initialize" => self.protocol.handle_initialize(
+                request.id.unwrap_or(super::types::RequestId::Null),
+            ),
+            "ping" => self.protocol.handle_ping(
+                request.id.unwrap_or(super::types::RequestId::Null),
+            ),
             "tools/list" => {
                 let tools = self.registry.list_tools();
-                self.protocol.create_tool_list_response(request.id, tools)
+                self.protocol.create_tool_list_response(
+                    request.id.unwrap_or(super::types::RequestId::Null),
+                    tools,
+                )
             }
-
             "tools/call" => {
                 match self
-                    .handle_tool_call(request.id.clone(), request.params)
+                    .handle_tool_call(
+                        request.id.clone().unwrap_or(super::types::RequestId::Null),
+                        request.params,
+                    )
                     .await
                 {
                     Ok(response) => response,
-                    Err(e) => self.protocol.create_error_response(request.id, e),
+                    Err(e) => self.protocol.create_error_response(
+                        request.id.unwrap_or(super::types::RequestId::Null),
+                        e,
+                    ),
                 }
             }
-
             _ => {
-                let error = super::types::JsonRpcError::method_not_found(&request.method);
-                super::types::JsonRpcResponse::error(request.id, error)
+                if is_notification {
+                    tracing::debug!(method = %request.method, "Ignoring unknown notification");
+                    return None;
+                }
+                let error =
+                    super::types::JsonRpcError::method_not_found(&request.method);
+                super::types::JsonRpcResponse::error(
+                    request.id.unwrap_or(super::types::RequestId::Null),
+                    error,
+                )
             }
+        };
+
+        if is_notification {
+            tracing::debug!(method = %request.method, "Processed notification");
+            None
+        } else {
+            Some(result)
         }
     }
 

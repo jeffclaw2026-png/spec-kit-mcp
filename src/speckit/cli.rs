@@ -189,24 +189,71 @@ impl SpecKitCli {
 
     /// Initialize a new spec-kit project
     pub async fn init(&self, project_name: &str, path: &Path) -> Result<CommandResult> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| SpecKitError::InvalidPath("Path contains invalid UTF-8".to_string()))?;
+        // specify >= v0.8.0 removed --path from `init`; use --here instead.
+        // Create the target directory and run `init --here --force` inside it.
+        tokio::fs::create_dir_all(path)
+            .await
+            .with_context(|| format!("Failed to create project directory: {}", path.display()))?;
 
-        let result = self
-            .execute_command(&["init", project_name, "--path", path_str])
-            .await?;
+        if self.test_mode {
+            return Ok(CommandResult {
+                stdout: format!(
+                    "Test mode: initialized project '{}' at {}",
+                    project_name,
+                    path.display()
+                ),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
 
-        if !result.is_success() {
+        // Build the full command with uvx + spec-kit repo + specify init --here --force
+        let mut full_args = vec![
+            "--from",
+            "git+https://github.com/github/spec-kit.git",
+            "specify",
+            "init",
+            "--here",
+            "--force",
+        ];
+
+        tracing::debug!(
+            command = %self.cli_path,
+            args = ?full_args,
+            cwd = %path.display(),
+            "Executing spec-kit init via uvx"
+        );
+
+        let command_future = Command::new(&self.cli_path)
+            .args(&full_args)
+            .current_dir(path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+
+        let output = timeout(Duration::from_secs(self.timeout_seconds), command_future)
+            .await
+            .context("Command timeout")?
+            .context("Failed to execute command")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        if exit_code != 0 {
             return Err(SpecKitError::command_failed(
                 format!("specify init {}", project_name),
-                &result.stderr,
-                result.exit_code,
+                &stderr,
+                exit_code,
             )
             .into());
         }
 
-        Ok(result)
+        Ok(CommandResult {
+            stdout,
+            stderr,
+            exit_code,
+        })
     }
 
     /// Create a constitution file

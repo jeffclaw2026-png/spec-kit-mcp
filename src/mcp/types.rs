@@ -11,8 +11,9 @@ pub struct JsonRpcRequest {
     /// JSON-RPC version (must be "2.0")
     pub jsonrpc: String,
 
-    /// Request ID (can be string or number)
-    pub id: RequestId,
+    /// Request ID (absent for notifications)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<RequestId>,
 
     /// Method name
     pub method: String,
@@ -222,8 +223,23 @@ mod tests {
 
         let request: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.jsonrpc, "2.0");
-        assert_eq!(request.id, RequestId::Number(1));
+        assert_eq!(request.id, Some(RequestId::Number(1)));
         assert_eq!(request.method, "tools/call");
+        assert!(request.params.is_some());
+    }
+
+    #[test]
+    fn test_parse_notification() {
+        let json = r#"{
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }"#;
+
+        let request: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.jsonrpc, "2.0");
+        assert_eq!(request.id, None);
+        assert_eq!(request.method, "notifications/initialized");
         assert!(request.params.is_some());
     }
 
