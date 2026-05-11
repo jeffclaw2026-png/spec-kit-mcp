@@ -1,6 +1,6 @@
 [package]
 name = "spec-kit-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Spec-Kit MCP Contributors"]
 description = "MCP server for GitHub Spec-Kit - enables AI coding assistants to use spec-driven development"

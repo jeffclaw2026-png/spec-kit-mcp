@@ -246,54 +246,285 @@ impl SpecKitCli {
 
     /// Create a technical plan
     pub async fn plan(&self, spec_file: &Path, output_path: &Path) -> Result<CommandResult> {
-        let spec_str = spec_file.to_str().ok_or_else(|| {
-            SpecKitError::InvalidPath("Spec file path contains invalid UTF-8".to_string())
-        })?;
+        // Read the spec file
+        let spec_content = match tokio::fs::read_to_string(spec_file).await {
+            Ok(content) => content,
+            Err(e) => {
+                return Err(SpecKitError::command_failed(
+                    "specify plan",
+                    &format!("Failed to read spec file: {}", e),
+                    1,
+                )
+                .into());
+            }
+        };
 
-        let output_str = output_path.to_str().ok_or_else(|| {
-            SpecKitError::InvalidPath("Output path contains invalid UTF-8".to_string())
-        })?;
+        // Extract requirements section from spec
+        let requirements = Self::extract_section(&spec_content, "Requirements");
 
-        let result = self
-            .execute_command(&["plan", "--spec", spec_str, "--output", output_str])
-            .await?;
+        // Generate plan from template
+        let plan = Self::generate_plan(&requirements, spec_file);
 
-        if !result.is_success() {
-            return Err(SpecKitError::command_failed(
-                "specify plan",
-                &result.stderr,
-                result.exit_code,
-            )
-            .into());
-        }
+        // Write to output
+        tokio::fs::write(output_path, &plan)
+            .await
+            .context("Failed to write plan file")?;
 
-        Ok(result)
+        tracing::info!(output = %output_path.display(), "Plan generated internally");
+
+        Ok(CommandResult {
+            stdout: format!("Technical plan created at {}", output_path.display()),
+            stderr: String::new(),
+            exit_code: 0,
+        })
     }
 
-    /// Generate task list
+    /// Generate a task list
     pub async fn tasks(&self, plan_file: &Path, output_path: &Path) -> Result<CommandResult> {
-        let plan_str = plan_file.to_str().ok_or_else(|| {
-            SpecKitError::InvalidPath("Plan file path contains invalid UTF-8".to_string())
-        })?;
+        // Read the plan file
+        let plan_content = match tokio::fs::read_to_string(plan_file).await {
+            Ok(content) => content,
+            Err(e) => {
+                return Err(SpecKitError::command_failed(
+                    "specify tasks",
+                    &format!("Failed to read plan file: {}", e),
+                    1,
+                )
+                .into());
+            }
+        };
 
-        let output_str = output_path.to_str().ok_or_else(|| {
-            SpecKitError::InvalidPath("Output path contains invalid UTF-8".to_string())
-        })?;
+        // Extract milestones from plan
+        let milestones = Self::extract_milestones(&plan_content);
 
-        let result = self
-            .execute_command(&["tasks", "--plan", plan_str, "--output", output_str])
-            .await?;
+        // Generate tasks from template
+        let tasks = Self::generate_tasks(&milestones, plan_file);
 
-        if !result.is_success() {
-            return Err(SpecKitError::command_failed(
-                "specify tasks",
-                &result.stderr,
-                result.exit_code,
-            )
-            .into());
+        // Write to output
+        tokio::fs::write(output_path, &tasks)
+            .await
+            .context("Failed to write tasks file")?;
+
+        tracing::info!(output = %output_path.display(), "Tasks generated internally");
+
+        Ok(CommandResult {
+            stdout: format!("Task list created at {}", output_path.display()),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    /// Extract a named section from markdown content
+    fn extract_section(content: &str, section_name: &str) -> String {
+        let mut in_section = false;
+        let mut result = String::new();
+
+        for line in content.lines() {
+            if line.starts_with("## ") && line[3..].trim() == section_name {
+                in_section = true;
+                continue;
+            }
+            if in_section && line.starts_with("## ") {
+                break;
+            }
+            if in_section && !line.trim().is_empty() {
+                result.push_str(line.trim());
+                result.push('\n');
+            }
         }
 
-        Ok(result)
+        if result.is_empty() {
+            // Fallback: include first non-empty lines after frontmatter
+            for line in content.lines().skip(1) {
+                if !line.trim().is_empty() && !line.starts_with('#') {
+                    result.push_str(line.trim());
+                    result.push('\n');
+                    if result.len() > 500 {
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Extract milestones from a plan file
+    fn extract_milestones(content: &str) -> Vec<(String, String)> {
+        let mut milestones = Vec::new();
+        let mut in_milestones = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("## Milestones") {
+                in_milestones = true;
+                continue;
+            }
+            if in_milestones && trimmed.starts_with("## ") {
+                break;
+            }
+            if in_milestones && !trimmed.is_empty() {
+                // Parse "1. **M1 Name**: description" pattern
+                if let Some(rest) = trimmed.splitn(2, ". ").nth(1) {
+                    let name = if let (Some(start), Some(end)) =
+                        (rest.find("**"), rest.rfind("**"))
+                    {
+                        let inner = &rest[start + 2..end];
+                        let after = &rest[end + 2..];
+                        let after_trimmed = after.trim_start_matches(':').trim();
+                        format!("{}: {}", inner, after_trimmed)
+                    } else {
+                        rest.to_string()
+                    };
+                    milestones.push((name, rest.to_string()));
+                }
+            }
+        }
+
+        // Also try "### Phase" headers
+        if milestones.is_empty() {
+            let mut current_phase = String::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("### Phase") {
+                    current_phase = trimmed.trim_start_matches("### ").to_string();
+                } else if !current_phase.is_empty()
+                    && trimmed.starts_with("- ")
+                    && !trimmed.contains("This plan was")
+                {
+                    milestones.push((
+                        current_phase.clone(),
+                        trimmed.trim_start_matches("- ").to_string(),
+                    ));
+                }
+            }
+        }
+
+        milestones
+    }
+
+    /// Generate a structured plan from spec requirements
+    fn generate_plan(requirements: &str, spec_file: &Path) -> String {
+        let spec_name = spec_file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "spec".to_string());
+
+        format!(
+            r##"# Implementation Plan
+
+**Spec**: {spec}
+**Generated**: auto-generated by spec-kit-mcp
+
+## Summary
+
+{req_summary}
+
+## Technical Context
+
+- **Language/Version**: TBD — choose based on project requirements
+- **Primary Dependencies**: TBD
+- **Storage**: TBD
+- **Testing**: TBD
+- **Target Platform**: TBD
+
+## Constitution Check
+
+- ⬜ Verify alignment with project constitution
+
+## Project Structure
+
+```
+src/
+├── main/          # Application entry point
+└── lib/           # Core library code
+tests/             # Test suite
+```
+
+## Architecture Decisions
+
+1. **Decision 1**: TBD — describe key architectural choice
+2. **Decision 2**: TBD — describe key architectural choice
+
+## Milestones
+
+1. **M1 Foundation**: Project setup, core abstractions, build system
+2. **M2 Core Implementation**: Primary feature set from specification
+3. **M3 Integration & Polish**: Wire components, error handling, UX polish
+4. **M4 Testing & Release**: Test suite, documentation, release preparation
+
+## Risks & Mitigations
+
+- **Risk**: TBD — identify key risk
+  **Mitigation**: TBD — mitigation strategy
+
+## Done Criteria
+
+- Core requirements from specification are implemented
+- Tests pass with adequate coverage
+- Documentation is complete
+- Code review has been performed
+"##,
+            spec = spec_name,
+            req_summary = if requirements.len() > 500 {
+                &requirements[..500]
+            } else {
+                requirements
+            },
+        )
+    }
+
+    /// Generate tasks from plan milestones
+    fn generate_tasks(milestones: &[(String, String)], plan_file: &Path) -> String {
+        let plan_name = plan_file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "plan".to_string());
+
+        let mut tasks = format!(
+            r##"# Tasks
+
+**Plan**: {plan}
+**Generated**: auto-generated by spec-kit-mcp
+
+## Task List
+
+| ID | Phase/Milestone | Task | Priority | Dependencies | Status |
+|----|-----------------|------|----------|-------------|--------|
+"##,
+            plan = plan_name,
+        );
+
+        if milestones.is_empty() {
+            // Fallback tasks
+            tasks.push_str(
+                "| T001 | Foundation | Project setup and scaffolding | High | None | pending |\n",
+            );
+            tasks.push_str("| T002 | Core | Core implementation from plan | High | T001 | pending |\n");
+            tasks.push_str("| T003 | Polish | Testing, docs, and polish | High | T002 | pending |\n");
+        } else {
+            for (i, (name, desc)) in milestones.iter().enumerate() {
+                let tid = format!("T{:03}", i + 1);
+                let short_name = if name.len() > 40 { &name[..40] } else { name };
+                let short_desc = if desc.len() > 80 { &desc[..80] } else { desc };
+                tasks.push_str(&format!(
+                    "| {tid} | {name} | {desc} | High | None | pending |\n",
+                    tid = tid,
+                    name = short_name,
+                    desc = short_desc,
+                ));
+            }
+        }
+
+        tasks.push_str(
+            r##"
+## Notes
+
+- This task list was auto-generated by spec-kit-mcp. Review and refine before implementing.
+- Break down further based on the implementation plan's phases and milestones.
+"##,
+        );
+
+        tasks
     }
 
     /// Analyze project consistency
